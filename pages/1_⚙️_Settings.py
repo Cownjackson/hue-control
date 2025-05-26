@@ -24,7 +24,7 @@ def show_settings_page():
 
     st.info("Here you can define the order in which rooms and devices appear in the main application. "
             "Names must exactly match those in your Hue setup (room names, device group base names, or standalone device names)."
-            "After saving, return to the main page and use 'Refresh View' or reload the app to see changes.")
+            "After saving, restart the app to see changes.")
 
     ui_order_data = load_ui_order(UI_ORDER_FILE_PATH)
     
