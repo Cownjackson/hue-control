@@ -1,3 +1,14 @@
+"""Streamlit web application for controlling Philips Hue lights.
+
+This application allows users to:
+- View and control individual lights, device groups, and rooms.
+- Turn lights on/off.
+- Adjust brightness for dimmable lights.
+- Re-index light information from the Hue Bridge.
+
+Configuration is managed via a .env file for Bridge IP and Hue Application Key,
+and JSON files for light structure and UI element ordering.
+"""
 import streamlit as st
 import json
 import os
@@ -5,7 +16,7 @@ import requests
 import urllib3
 from dotenv import load_dotenv
 import re
-from streamlit import fragment # Assuming st.fragment is available
+from streamlit import fragment
 
 # Set page config as the FIRST Streamlit command
 st.set_page_config(
@@ -19,12 +30,12 @@ try:
     from hue_structure_generator import generate_hue_structure_json, CONFIG_VALID as HUE_GEN_CONFIG_VALID
 except ImportError:
     st.error("Failed to import `hue_structure_generator`. Ensure it exists and is in the same directory.")
-    def generate_hue_structure_json(verbose=False): # Add verbose to dummy
+    def generate_hue_structure_json(verbose=False):
         st.error("Hue structure generator is not available.")
         return None
     HUE_GEN_CONFIG_VALID = False
 
-# --- Configuration (Loaded after potential re-index) ---
+# Configuration
 load_dotenv()
 BRIDGE_IP = os.getenv("BRIDGE_IP")
 HUE_APP_KEY = os.getenv("HUE_APP_KEY")
@@ -37,14 +48,9 @@ if not BRIDGE_IP: st.error("ERROR: BRIDGE_IP not found in .env."); APP_CONFIG_VA
 if not HUE_APP_KEY: st.error("ERROR: HUE_APP_KEY not found in .env."); APP_CONFIG_VALID = False
 
 # --- Force Re-index on Every Load/Interaction (if possible) ---
-# This section is moved up and modified to run before data loading functions are defined/called.
-# We will still show sidebar option for manual re-index for clarity or if this fails.
 if APP_CONFIG_VALID and HUE_GEN_CONFIG_VALID:
-    # print("DEBUG: Attempting to re-index silently on page load/interaction...") # For debugging
     with st.spinner("Fetching latest light states..."): # Subtle spinner
-        generate_hue_structure_json(verbose=False) # Call with verbose=False
-    # Caches will be cleared below, right before they are used.
-    # This is to ensure they are cleared AFTER the re-index and BEFORE data loading.
+        generate_hue_structure_json(verbose=False)
 else:
     if not APP_CONFIG_VALID:
         st.warning("App .env config invalid. Cannot auto-refresh light states.")
@@ -64,10 +70,17 @@ else:
     BASE_URL_V2 = None
     HEADERS_V2 = {}
 
-# --- Data Loading Functions (with caching) ---
-# These are defined after the potential re-index and before their first call.
+# Data Loading Functions (with caching)
 @st.cache_data()
 def load_hue_structure(file_path: str):
+    """Loads the Hue light structure from a JSON file.
+
+    Args:
+        file_path: The path to the JSON file.
+
+    Returns:
+        A dictionary containing the Hue light structure, or None if an error occurs.
+    """
     try:
         with open(file_path, 'r') as f: return json.load(f)
     except FileNotFoundError: return None
@@ -75,6 +88,14 @@ def load_hue_structure(file_path: str):
 
 @st.cache_data
 def get_flat_light_services_map(structure_data: dict) -> dict:
+    """Creates a flat map of light service IDs to their details from the structure data.
+
+    Args:
+        structure_data: The Hue light structure data.
+
+    Returns:
+        A dictionary mapping service_id to service details.
+    """
     services_map = {}
     if not structure_data or "rooms" not in structure_data: return {}
     for room in structure_data["rooms"]:
@@ -87,6 +108,14 @@ def get_flat_light_services_map(structure_data: dict) -> dict:
 
 @st.cache_data()
 def load_ui_order(file_path: str):
+    """Loads the UI element order configuration from a JSON file.
+
+    Args:
+        file_path: The path to the JSON file.
+
+    Returns:
+        A dictionary containing the UI order configuration, or an empty dict if an error occurs.
+    """
     try:
         with open(file_path, 'r') as f:
             return json.load(f)
@@ -99,6 +128,15 @@ def load_ui_order(file_path: str):
 
 @st.cache_data
 def get_ordered_room_definitions(structure_data: dict, order_config: dict):
+    """Gets room definitions sorted according to the UI order configuration.
+
+    Args:
+        structure_data: The Hue light structure data.
+        order_config: The UI order configuration.
+
+    Returns:
+        A list of room definitions, sorted according to preferred_room_order.
+    """
     if not structure_data or "rooms" not in structure_data:
         return []
     rooms_data_internal = structure_data.get("rooms", [])
@@ -106,16 +144,23 @@ def get_ordered_room_definitions(structure_data: dict, order_config: dict):
     return get_ordered_items(rooms_data_internal, preferred_room_order_internal, "room_name")
 
 # --- Clear Caches After Re-index and Before Use ---
-# This ensures that subsequent calls to these functions get fresh data.
-if APP_CONFIG_VALID and HUE_GEN_CONFIG_VALID: # Only clear if re-index could have run
+if APP_CONFIG_VALID and HUE_GEN_CONFIG_VALID:
     load_hue_structure.clear()
     get_flat_light_services_map.clear()
     get_ordered_room_definitions.clear()
-    # load_ui_order.clear() # UI order doesn't change with re-index of lights
 
-# --- Helper Functions for Hue API Interaction ---
+# Helper Functions for Hue API Interaction
 def send_light_payload(service_id: str, payload: dict, action_description: str) -> bool:
-    """Sends a generic payload to a light service."""
+    """Sends a PUT request to a specific light service endpoint.
+
+    Args:
+        service_id: The ID of the light service to control.
+        payload: The JSON payload to send for the light.
+        action_description: A description of the action being performed (for error messages).
+
+    Returns:
+        True if the command was successful, False otherwise.
+    """
     if not APP_CONFIG_VALID: return False
     url = f"{BASE_URL_V2}/resource/light/{service_id}"
     try:
@@ -132,7 +177,12 @@ def send_light_payload(service_id: str, payload: dict, action_description: str) 
         return False
 
 def set_lights_on_off(service_ids: list[str], turn_on: bool):
-    """Turns a list of lights on or off."""
+    """Turns a list of lights on or off.
+
+    Args:
+        service_ids: A list of light service IDs to control.
+        turn_on: True to turn lights on, False to turn them off.
+    """
     if not service_ids: st.warning("No lights provided to turn on/off."); return
     action = "ON" if turn_on else "OFF"; success_count = 0
     total_lights = len(service_ids); my_bar = None
@@ -147,7 +197,13 @@ def set_lights_on_off(service_ids: list[str], turn_on: bool):
     st.session_state.data_dirty = True
 
 def set_lights_brightness(service_ids: list[str], brightness_percent: int, light_details_map: dict):
-    """Sets brightness for a list of dimmable lights."""
+    """Sets the brightness for a list of dimmable lights.
+
+    Args:
+        service_ids: A list of light service IDs to control.
+        brightness_percent: The desired brightness percentage (0-100).
+        light_details_map: A map of service_id to light details, used to check dimmable support.
+    """
     if not service_ids: st.warning("No lights selected for brightness change."); return
     success_count = 0; dimmable_lights_controlled = 0
     total_to_potentially_control = len(service_ids); my_bar = None
@@ -165,10 +221,22 @@ def set_lights_brightness(service_ids: list[str], brightness_percent: int, light
     elif dimmable_lights_controlled > 0: st.warning(f"Attempted to set brightness for {dimmable_lights_controlled} light(s). {success_count} succeeded.")
     st.session_state.data_dirty = True
 
-# --- Helper function for ordering ---
+# Helper function for ordering
 def get_ordered_items(actual_items: list, preferred_order_names: list, name_key: str):
+    """Sorts a list of dictionary items based on a preferred order of names.
+
+    Items in preferred_order_names are placed first, in that order.
+    Remaining items are sorted alphabetically by the value of their name_key.
+
+    Args:
+        actual_items: The list of dictionaries to sort.
+        preferred_order_names: A list of names defining the preferred order.
+        name_key: The key in each dictionary whose value is used for matching and sorting.
+
+    Returns:
+        A new list of sorted items.
+    """
     if not preferred_order_names:
-        # Sort by name_key if no preferred order for this list
         return sorted(actual_items, key=lambda x: x.get(name_key, ""))
 
     ordered_items_map = {item.get(name_key): item for item in actual_items}
@@ -187,9 +255,18 @@ def get_ordered_items(actual_items: list, preferred_order_names: list, name_key:
 
 @fragment
 def render_room_content_fragment(room, room_idx, flat_light_services_map, ui_order_config_data):
-    # This function will contain the UI rendering logic for a single room tab.
-    # Arguments like flat_light_services_map and ui_order_config_data are passed down.
+    """Renders the UI content for a single room tab within a Streamlit fragment.
 
+    This includes room-level controls (on/off, brightness) and then iterates
+    through device groups and standalone devices within the room, rendering
+    controls for each.
+
+    Args:
+        room: Dictionary containing data for the current room.
+        room_idx: Index of the current room (used for unique widget keys).
+        flat_light_services_map: A flat map of all light service IDs to their details.
+        ui_order_config_data: Configuration for UI element ordering.
+    """
     room_all_service_ids = []
     room_dimmable_service_ids = []
     initial_brightness_sum = 0
@@ -318,10 +395,18 @@ def render_room_content_fragment(room, room_idx, flat_light_services_map, ui_ord
                                     args=(brightness_key_sdev, s_dev_dimmable_service_ids, flat_light_services_map))
                     st.markdown("---")
             
-    st.divider() # Divider after each tab's content within the fragment
+    st.divider()
 
-# --- UI Rendering ---
+# UI Rendering
 def create_on_off_buttons(control_label: str, service_ids: list[str], key_prefix: str, use_container_width=True):
+    """Creates a pair of ON/OFF buttons in two columns for a set of lights.
+
+    Args:
+        control_label: Label used for generating unique keys and displayed text (if applicable).
+        service_ids: A list of light service IDs to be controlled by these buttons.
+        key_prefix: A prefix for generating unique Streamlit widget keys.
+        use_container_width: Whether the buttons should use the full container width.
+    """
     if not service_ids: return
     col1, col2 = st.columns(2)
     sanitized_label = re.sub(r'[^a-zA-Z0-9_]', '', control_label.replace(' ', '_')).lower()
@@ -333,6 +418,14 @@ def create_on_off_buttons(control_label: str, service_ids: list[str], key_prefix
             set_lights_on_off(service_ids, False)
 
 def get_all_service_ids_from_structure(structure):
+    """Extracts all unique light service IDs from the entire Hue structure.
+
+    Args:
+        structure: The Hue light structure data.
+
+    Returns:
+        A list of all unique light service IDs found in the structure.
+    """
     all_ids = []
     if not structure or "rooms" not in structure: return []
     for room in structure["rooms"]:
@@ -341,7 +434,7 @@ def get_all_service_ids_from_structure(structure):
         for s_device in room.get("standalone_devices", []): all_ids.extend([s["service_id"] for s in s_device.get("light_services", [])])
     return list(set(all_ids))
 
-# --- Main App ---
+# Main App
 if 'data_dirty' not in st.session_state: st.session_state.data_dirty = False
 
 with st.sidebar:
@@ -388,13 +481,6 @@ with main_content_container:
     st.divider()
 
 if ordered_rooms and room_tabs:
-    # room_names = [room['room_name'] for room in ordered_rooms] # Already defined
-    
-    # Add emoji to tab labels for consistency if desired, or keep plain
-    # For example: tab_labels = [f"🚪 {name}" for name in room_names]
-    # Using plain names for now as they are generally cleaner for tabs
-    # room_tabs = st.tabs(room_names) # Tabs are already defined
-
     for room_idx, room in enumerate(ordered_rooms):
         with room_tabs[room_idx]:
             # Call the fragment function to render the content for this tab
@@ -404,125 +490,8 @@ if ordered_rooms and room_tabs:
                 flat_light_services_map=flat_light_services, 
                 ui_order_config_data=ui_order_config
             )
-            # Content previously inside st.expander starts here
-            # room_all_service_ids = []; room_dimmable_service_ids = []  # REMOVE THIS AND SUBSEQUENT LOGIC
-            # initial_brightness_sum = 0; lights_on_and_dimmable_count = 0 # REMOVE
-            # temp_room_services = [] # REMOVE
-            # for group in room.get("device_groups", []):  # REMOVE
-            #     for h_device in group.get("hue_devices", []): temp_room_services.extend(h_device.get("light_services", [])) # REMOVE
-            # for s_device in room.get("standalone_devices", []): temp_room_services.extend(s_device.get("light_services", [])) # REMOVE
-            # for service_obj in temp_room_services: # REMOVE
-            #     service_id = service_obj["service_id"] # REMOVE
-            #     room_all_service_ids.append(service_id) # REMOVE
-            #     service_detail = flat_light_services.get(service_id, {}) # REMOVE
-            #     if service_detail.get("supports_dimming"): # REMOVE
-            #         room_dimmable_service_ids.append(service_id) # REMOVE
-            #         if service_detail.get("is_on") and service_detail.get("current_brightness") is not None: # REMOVE
-            #             initial_brightness_sum += service_detail["current_brightness"] # REMOVE
-            #             lights_on_and_dimmable_count += 1 # REMOVE
-            # room_all_service_ids = list(set(room_all_service_ids)); room_dimmable_service_ids = list(set(room_dimmable_service_ids)) # REMOVE
-            # room_initial_avg_brightness = (initial_brightness_sum / lights_on_and_dimmable_count) if lights_on_and_dimmable_count > 0 else 50.0 # REMOVE
-            
-
-            # if room_all_service_ids: # REMOVE
-            #     st.markdown("##### Device Controls within this Room:") # REMOVE
-
-            #     all_room_devices = [] # REMOVE
-            #     device_groups_in_room = room.get("device_groups", []) # REMOVE
-            #     standalone_devices_in_room = room.get("standalone_devices", []) # REMOVE
-                
-            #     for dg in device_groups_in_room: # REMOVE
-            #         dg['_ui_sort_name'] = dg.get("group_base_name")  # REMOVE
-            #         dg['_ui_type'] = 'group'  # REMOVE
-            #         all_room_devices.append(dg) # REMOVE
-            #     for sd in standalone_devices_in_room: # REMOVE
-            #         sd['_ui_sort_name'] = sd.get("device_name")  # REMOVE
-            #         sd['_ui_type'] = 'standalone'  # REMOVE
-            #         all_room_devices.append(sd) # REMOVE
-
-            #     room_specific_device_order = ui_order_config.get("device_order_in_room", {}).get(room['room_name'], []) # REMOVE
-            #     ordered_room_devices = get_ordered_items(all_room_devices, room_specific_device_order, "_ui_sort_name") # REMOVE
-
-            #     for device_item in ordered_room_devices: # REMOVE
-            #         if device_item['_ui_type'] == 'group': # REMOVE
-            #             device_group = device_item # REMOVE
-            #             raw_group_name = device_group.get("group_base_name", "Unnamed Group") # REMOVE
-            #             group_base_name_display = re.sub(r"(\\.?)([A-Z])", r"\\1 \\2", raw_group_name).strip() # REMOVE
-            #             if not group_base_name_display: group_base_name_display = raw_group_name # REMOVE
-                        
-            #             group_all_service_ids = []; group_dimmable_service_ids = [] # REMOVE
-            #             group_brightness_sum = 0; group_lights_on_dimmable = 0 # REMOVE
-            #             for h_device in device_group.get("hue_devices", []): # REMOVE
-            #                 for service_obj in h_device.get("light_services", []): # REMOVE
-            #                     service_id = service_obj["service_id"] # REMOVE
-            #                     group_all_service_ids.append(service_id) # REMOVE
-            #                     service_detail = flat_light_services.get(service_id, {}) # REMOVE
-            #                     if service_detail.get("supports_dimming"): # REMOVE
-            #                         group_dimmable_service_ids.append(service_id) # REMOVE
-            #                         if service_detail.get("is_on") and service_detail.get("current_brightness") is not None: # REMOVE
-            #                             group_brightness_sum += service_detail["current_brightness"] # REMOVE
-            #                             group_lights_on_dimmable += 1 # REMOVE
-            #             group_all_service_ids = list(set(group_all_service_ids)); group_dimmable_service_ids = list(set(group_dimmable_service_ids)) # REMOVE
-            #             group_initial_avg_brightness = (group_brightness_sum / group_lights_on_dimmable) if group_lights_on_dimmable > 0 else 50.0 # REMOVE
-
-            #             if group_all_service_ids: # REMOVE
-            #                 group_key_suffix = re.sub(r'[^a-zA-Z0-9_]', '', group_base_name_display).lower() # REMOVE
-            #                 st.subheader(f"{group_base_name_display}") # REMOVE
-            #                 create_on_off_buttons(f"Group {group_base_name_display}", group_all_service_ids, f"room_{room_idx}_group_{group_key_suffix}") # REMOVE
-            #                 if group_dimmable_service_ids: # REMOVE
-            #                     brightness_key_group = f"room_{room_idx}_group_{group_key_suffix}_brightness" # REMOVE
-            #                     def group_brightness_callback(b_key, dim_ids, f_l_s): # REMOVE
-            #                         new_b_val = st.session_state[b_key] # REMOVE
-            #                         set_lights_brightness(dim_ids, int(new_b_val), f_l_s) # REMOVE
-            #                     st.slider(f"Brightness for {group_base_name_display}", min_value=0, max_value=100, value=int(group_initial_avg_brightness), # REMOVE
-            #                                 key=brightness_key_group,  # REMOVE
-            #                                 on_change=group_brightness_callback,  # REMOVE
-            #                                 args=(brightness_key_group, group_dimmable_service_ids, flat_light_services) # REMOVE
-            #                                 ) # REMOVE
-            #                 st.markdown("---") # REMOVE
-
-            #         elif device_item['_ui_type'] == 'standalone': # REMOVE
-            #             standalone_device = device_item # REMOVE
-            #             s_dev_all_service_ids = []; s_dev_dimmable_service_ids = [] # REMOVE
-            #             s_dev_brightness_sum = 0; s_dev_lights_on_dimmable = 0 # REMOVE
-            #             for service_obj in standalone_device.get("light_services", []): # REMOVE
-            #                 service_id = service_obj["service_id"] # REMOVE
-            #                 s_dev_all_service_ids.append(service_id) # REMOVE
-            #                 service_detail = flat_light_services.get(service_id, {}) # REMOVE
-            #                 if service_detail.get("supports_dimming"): # REMOVE
-            #                     s_dev_dimmable_service_ids.append(service_id) # REMOVE
-            #                     if service_detail.get("is_on") and service_detail.get("current_brightness") is not None: # REMOVE
-            #                         s_dev_brightness_sum += service_detail["current_brightness"] # REMOVE
-            #                         s_dev_lights_on_dimmable += 1 # REMOVE
-            #             s_dev_all_service_ids = list(set(s_dev_all_service_ids)); s_dev_dimmable_service_ids = list(set(s_dev_dimmable_service_ids)) # REMOVE
-            #             s_dev_initial_avg_brightness = (s_dev_brightness_sum / s_dev_lights_on_dimmable) if s_dev_lights_on_dimmable > 0 else 50.0 # REMOVE
-
-            #             if s_dev_all_service_ids: # REMOVE
-            #                 s_dev_name = standalone_device['device_name'] # REMOVE
-            #                 s_dev_key_suffix = re.sub(r'[^a-zA-Z0-9_]', '', s_dev_name).lower() # REMOVE
-            #                 st.subheader(f"{s_dev_name}") # REMOVE
-            #                 create_on_off_buttons(f"{s_dev_name}", s_dev_all_service_ids, f"room_{room_idx}_sdev_{s_dev_key_suffix}") # REMOVE
-            #                 if s_dev_dimmable_service_ids: # REMOVE
-            #                     brightness_key_sdev = f"room_{room_idx}_sdev_{s_dev_key_suffix}_brightness" # REMOVE
-            #                     def sdev_brightness_callback(b_key, dim_ids, f_l_s): # REMOVE
-            #                         new_b_val = st.session_state[b_key] # REMOVE
-            #                         set_lights_brightness(dim_ids, int(new_b_val), f_l_s) # REMOVE
-            #                     st.slider(f"Brightness for {s_dev_name}", min_value=0, max_value=100, value=int(s_dev_initial_avg_brightness), # REMOVE
-            #                                 key=brightness_key_sdev,  # REMOVE
-            #                                 on_change=sdev_brightness_callback,  # REMOVE
-            #                                 args=(brightness_key_sdev, s_dev_dimmable_service_ids, flat_light_services) # REMOVE
-            #                                 ) # REMOVE
-            #                 st.markdown("---") # REMOVE
-            
-            # st.divider() # Divider after each tab's content # REMOVE - This is now inside the fragment
 else:
-    # This 'else' corresponds to 'if ordered_rooms and room_tabs:'
-    # If room_tabs is None (because no ordered_rooms), display the message.
-    # This also implicitly handles the case where ordered_rooms might be true but st.tabs returned None (though unlikely for st.tabs).
     st.info("No rooms found in the Hue structure. Try re-indexing if you expect to see rooms.")
-
-# The st.caption("End of controls.") was removed by user.
-# If you want a general footer, it can be placed here, outside the if rooms_data block.
 
 
 
